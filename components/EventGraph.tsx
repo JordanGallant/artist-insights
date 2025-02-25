@@ -10,10 +10,12 @@ import {
   Tooltip,
   ResponsiveContainer,
   ReferenceLine,
+  TooltipProps,
 } from "recharts";
 import BottomDiv from "./BottomDiv";
 import Loader from "./Loader";
 import StatCard from "./StatCard"
+import { NameType, ValueType } from "recharts/types/component/DefaultTooltipContent";
 
 // Move interfaces to their own section for better organization
 interface BaseEvent {
@@ -25,13 +27,6 @@ interface BaseEvent {
 
 interface EventsResponse {
   raw_events: BaseEvent[];
-}
-
-interface ChartDataPoint {
-  timeLabel: string;
-  count: number;
-  previousCount?: number;
-  hour?: number;
 }
 
 interface EventGraphProps {
@@ -460,10 +455,13 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
   }, [eventCounts, previousEventCounts]);
 
   // Custom tooltip component
-  const CustomTooltip = ({ active, payload, label }: any) => {
+  const CustomTooltip = ({
+    active,
+    payload,
+    label,
+  }: TooltipProps<ValueType, NameType>) => {
     if (active && payload && payload.length > 0) {
-      // Convert label to Date object
-      const labelDate = new Date(label);
+      const labelDate = new Date(label as string);
       let previousDate = "";
       let formattedLabel = "";
 
@@ -515,9 +513,6 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
     }
     return null;
   };
-
-  // Component for stats cards
-  
 
   // Handle date selection
   const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
