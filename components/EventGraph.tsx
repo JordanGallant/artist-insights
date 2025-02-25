@@ -1,5 +1,5 @@
 "use client";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { graphqlClient } from "../lib/graphql";
 import { EventType } from "../app/types";
 import {
@@ -13,338 +13,345 @@ import {
 } from "recharts";
 import BottomDiv from "./BottomDiv";
 import Loader from "./Loader";
+import StatCard from "./StatCard"
 
+// Move interfaces to their own section for better organization
 interface BaseEvent {
   db_write_timestamp: string;
   block_timestamp: number;
   event_name: string;
+  contract_name: string;
 }
 
-// Add a type for the GraphQL response
 interface EventsResponse {
   raw_events: BaseEvent[];
 }
 
-// Calculate timestamps for different time ranges
-const now = Math.floor(Date.now() / 1000);
-const oneDayAgo = now - 24 * 60 * 60;
-const oneWeekAgo = now - 7 * 24 * 60 * 60;
-const oneMonthAgo = now - 30 * 24 * 60 * 60;
+interface ChartDataPoint {
+  timeLabel: string;
+  count: number;
+  previousCount?: number;
+  hour?: number;
+}
 
-type EventGraphProps = {
+interface EventGraphProps {
   eventTypes: EventType[];
+}
+
+// Constants extracted to the top level
+const CONTRACT_ADDRESS = "0x20D419a8e12C45f88fDA7c5760bb6923Cee27F98";
+const TIME_RANGES = {
+  DAY: "day" as const,
+  WEEK: "week" as const,
+  MONTH: "month" as const,
 };
 
 const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
+  // State management
   const [eventCounts, setEventCounts] = useState<Record<string, number>>({});
-  const [previousEventCounts, setPreviousEventCounts] = useState<
-    Record<string, number>
-  >({});
+  const [previousEventCounts, setPreviousEventCounts] = useState<Record<string, number>>({});
   const [last30MinCount, setLast30MinCount] = useState<number>(0);
-  const [timeRange, setTimeRange] = useState<"day" | "week" | "month">("week");
+  const [timeRange, setTimeRange] = useState<"day" | "week" | "month">(TIME_RANGES.WEEK);
   const [selectedEvent, setSelectedEvent] = useState<string>("");
   const [showPreviousPeriod, setShowPreviousPeriod] = useState(true);
   const [selectedDate, setSelectedDate] = useState<string>(
     new Date().toISOString().split("T")[0]
   );
   const [isLoading, setIsLoading] = useState(false);
-  const selectedEventFound = eventTypes.find(
-    (event) => event.id === selectedEvent
-  ) || { id: "", eventName: "", label: "", contractType: "" };
 
+  // Memoize the selected event to prevent unnecessary recalculations
+  const selectedEventFound = useMemo(() => 
+    eventTypes.find((event) => event.id === selectedEvent) || 
+    { id: "", eventName: "", label: "", contractType: "" },
+  [selectedEvent, eventTypes]);
+
+  // Calculate timestamps based on the current time (memoized to avoid recalculations)
+  const timeStamps = useMemo(() => {
+    const now = Math.floor(Date.now() / 1000);
+    return {
+      now,
+      oneDayAgo: now - 24 * 60 * 60,
+      oneWeekAgo: now - 7 * 24 * 60 * 60,
+      oneMonthAgo: now - 30 * 24 * 60 * 60,
+      thirtyMinutesAgo: now - 30 * 60
+    };
+  }, []);
+
+  // Extract the fetchEventsWithPagination function to improve readability
+  const fetchEventsWithPagination = useCallback(async (
+    eventName: string,
+    contractType: string,
+    startTime: number,
+    endTime?: number
+  ) => {
+    let allEvents: BaseEvent[] = [];
+    let offset = 0;
+    let hasMore = true;
+
+    while (hasMore) {
+      //Query
+      const paginatedQuery = `
+        query Events {
+          raw_events(
+            where: {
+              event_name: {_eq: "${eventName}"}, 
+              contract_name: {_eq: "${contractType}"},
+              block_timestamp: {_gte: ${startTime}${
+                endTime ? `, _lt: ${endTime}` : ""
+              }}
+            }
+            order_by: {block_timestamp: asc}
+            limit: 1000
+            offset: ${offset}
+          ) {
+            block_timestamp
+            event_name
+            contract_name
+          }
+        }
+      `;
+
+      try {
+        const response = await graphqlClient.request<EventsResponse>(paginatedQuery);
+        const events = response.raw_events || [];
+
+        allEvents = [...allEvents, ...events];
+
+        if (events.length < 1000) {
+          hasMore = false;
+        } else {
+          offset += 1000;
+        }
+      } catch (error) {
+        console.error("Error in pagination query:", error);
+        hasMore = false;
+      }
+    }
+
+    return allEvents;
+  }, []);
+
+  // Helper function to calculate date ranges
+  const getDateRange = useCallback((date: string, daysOffset = 0) => {
+    const dateTime = new Date(date);
+    dateTime.setDate(dateTime.getDate() + daysOffset);
+    dateTime.setHours(0, 0, 0, 0);
+    const startOfDay = Math.floor(dateTime.getTime() / 1000);
+    const endOfDay = startOfDay + 24 * 60 * 60;
+    
+    return { startOfDay, endOfDay };
+  }, []);
+
+  // Function to initialize time period data structures
+  const initializeTimePeriodData = useCallback((timeRange: "day" | "week" | "month", selectedDate: string) => {
+    const counts: Record<string, number> = {};
+    const previousCounts: Record<string, number> = {};
+    const now = new Date();
+
+    if (timeRange === TIME_RANGES.DAY) {
+      const { startOfDay } = getDateRange(selectedDate);
+      const { startOfDay: prevStartOfDay } = getDateRange(selectedDate, -1);
+      
+      const selectedDateTime = new Date(startOfDay * 1000);
+      const previousDateTime = new Date(prevStartOfDay * 1000);
+
+      // Initialize hours for selected date
+      for (let i = 0; i < 24; i++) {
+        const date = new Date(selectedDateTime);
+        date.setHours(i, 0, 0, 0);
+        const hourStr = date.toLocaleString("en-US", {
+          day: "numeric",
+          month: "short",
+          hour: "numeric",
+          hour12: true,
+        });
+        counts[hourStr] = 0;
+      }
+
+      // Initialize previous day's hours
+      for (let i = 0; i < 24; i++) {
+        const date = new Date(previousDateTime);
+        date.setHours(i, 0, 0, 0);
+        const hourStr = date.toLocaleString("en-US", {
+          day: "numeric",
+          month: "short",
+          hour: "numeric",
+          hour12: true,
+        });
+        previousCounts[hourStr] = 0;
+      }
+    } else if (timeRange === TIME_RANGES.WEEK) {
+      // Create array of last 7 days with exact timestamps
+      const dates = Array.from({ length: 7 }, (_, i) => {
+        const date = new Date(now.getTime() - (6 - i) * 24 * 60 * 60 * 1000);
+        date.setHours(0, 0, 0, 0);
+        return {
+          timestamp: date.getTime(),
+          label: date.toLocaleString("en-US", {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+          }),
+        };
+      });
+
+      dates.forEach(({ label }) => {
+        counts[label] = 0;
+      });
+
+      // Previous 7 days
+      const previousDates = Array.from({ length: 7 }, (_, i) => {
+        const date = new Date(now.getTime() - (13 - i) * 24 * 60 * 60 * 1000);
+        date.setHours(0, 0, 0, 0);
+        return {
+          timestamp: date.getTime(),
+          label: date.toLocaleString("en-US", {
+            weekday: "short",
+            month: "short",
+            day: "numeric",
+          }),
+        };
+      });
+
+      previousDates.forEach(({ label }) => {
+        previousCounts[label] = 0;
+      });
+    } else {
+      // Month view
+      // Initialize current period days
+      for (let i = 29; i >= 0; i--) {
+        const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+        const dayStr = date.toLocaleDateString("en-US", {
+          day: "numeric",
+          month: "short",
+        });
+        counts[dayStr] = 0;
+      }
+
+      // Initialize previous period days
+      for (let i = 29; i >= 0; i--) {
+        const date = new Date(now.getTime() - (i + 30) * 24 * 60 * 60 * 1000);
+        const dayStr = date.toLocaleDateString("en-US", {
+          day: "numeric",
+          month: "short",
+        });
+        previousCounts[dayStr] = 0;
+      }
+    }
+
+    return { counts, previousCounts };
+  }, [getDateRange]);
+
+  // Function to count events and populate data structures
+  const countEvents = useCallback((
+    events: BaseEvent[], 
+    countMap: Record<string, number>,
+    timeRange: "day" | "week" | "month"
+  ) => {
+    events.forEach((event: BaseEvent) => {
+      const date = new Date(event.block_timestamp * 1000);
+      
+      let timeLabel;
+      if (timeRange === TIME_RANGES.DAY) {
+        timeLabel = date.toLocaleString("en-US", {
+          day: "numeric",
+          month: "short",
+          hour: "numeric",
+          hour12: true,
+        });
+      } else if (timeRange === TIME_RANGES.WEEK) {
+        date.setHours(0, 0, 0, 0);
+        timeLabel = date.toLocaleString("en-US", {
+          weekday: "short",
+          month: "short",
+          day: "numeric",
+        });
+      } else {
+        timeLabel = date.toLocaleDateString("en-US", {
+          day: "numeric",
+          month: "short",
+        });
+      }
+      
+      if (countMap[timeLabel] !== undefined) {
+        countMap[timeLabel] += 1;
+      }
+    });
+    
+    return countMap;
+  }, []);
+
+  // Main data fetching function
   useEffect(() => {
+    // Skip if no event is selected
+    if (!selectedEventFound.eventName) return;
+    
     const fetchData = async () => {
       setIsLoading(true);
       try {
-        // Function to fetch events with pagination
-        const fetchEventsWithPagination = async (
-          id: string,
-          startTime: number,
-          endTime?: number
-        ) => {
-          let allEvents: BaseEvent[] = [];
-          let offset = 0;
-          let hasMore = true;
-
-          while (hasMore) {
-            const paginatedQuery = `
-  query Events {
-    raw_events(
-      where: {
-        event_name: {_eq: "${selectedEventFound.eventName}"}, 
-        contract_name: {_eq: "${selectedEventFound.contractType}"},
-        block_timestamp: {_gte: ${startTime}${
-              endTime ? `, _lt: ${endTime}` : ""
-            }}
-      }
-      order_by: {block_timestamp: asc}
-      limit: 1000
-      offset: ${offset}
-    ) {
-      block_timestamp
-      event_name
-      contract_name
-    }
-  }
-`;
-
-            const response = await graphqlClient.request<EventsResponse>(
-              paginatedQuery
-            );
-            const events = response.raw_events || [];
-
-            allEvents = [...allEvents, ...events];
-
-            if (events.length < 1000) {
-              hasMore = false;
-            } else {
-              offset += 1000;
-            }
-          }
-
-          return allEvents;
-        };
-
-        // Add query for last 30 minutes
-        const thirtyMinutesAgo = Math.floor(Date.now() / 1000) - 30 * 60;
+        // Fetch last 30 minutes data
         const last30MinEvents = await fetchEventsWithPagination(
-          selectedEvent,
-          thirtyMinutesAgo
+          selectedEventFound.eventName,
+          selectedEventFound.contractType,
+          timeStamps.thirtyMinutesAgo
         );
         setLast30MinCount(last30MinEvents.length);
 
-        // When a specific date is selected, calculate start and end timestamps for that day
-        const selectedDateTime = new Date(selectedDate);
-        selectedDateTime.setHours(0, 0, 0, 0);
-        const startOfDay = Math.floor(selectedDateTime.getTime() / 1000);
-        const endOfDay = startOfDay + 24 * 60 * 60;
-
-        // Calculate previous day timestamps
-        const previousDateTime = new Date(selectedDate);
-        previousDateTime.setDate(previousDateTime.getDate() - 1);
-        previousDateTime.setHours(0, 0, 0, 0);
-        const previousStartOfDay = Math.floor(
-          previousDateTime.getTime() / 1000
-        );
-        const previousEndOfDay = previousStartOfDay + 24 * 60 * 60;
-
-        // Fetch current period events
-        const currentEvents =
-          timeRange === "day" && selectedDate
-            ? await fetchEventsWithPagination(
-                selectedEvent,
-                startOfDay,
-                endOfDay
-              )
-            : await fetchEventsWithPagination(
-                selectedEvent,
-                timeRange === "day"
-                  ? oneDayAgo
-                  : timeRange === "week"
-                  ? oneWeekAgo
-                  : oneMonthAgo
-              );
-
-        // Fetch previous period events
-        const previousEvents =
-          timeRange === "day" && selectedDate
-            ? await fetchEventsWithPagination(
-                selectedEvent,
-                previousStartOfDay,
-                previousEndOfDay
-              )
-            : await fetchEventsWithPagination(
-                selectedEvent,
-                (timeRange === "day"
-                  ? oneDayAgo
-                  : timeRange === "week"
-                  ? oneWeekAgo
-                  : oneMonthAgo) -
-                  (timeRange === "day"
-                    ? 24 * 60 * 60
-                    : timeRange === "week"
-                    ? 7 * 24 * 60 * 60
-                    : 30 * 24 * 60 * 60),
-                timeRange === "day"
-                  ? oneDayAgo
-                  : timeRange === "week"
-                  ? oneWeekAgo
-                  : oneMonthAgo
-              );
-
-        const counts: Record<string, number> = {};
-        const previousCounts: Record<string, number> = {};
-
-        if (timeRange === "day") {
-          // Initialize hours for selected date
-          for (let i = 0; i < 24; i++) {
-            const date = new Date(selectedDateTime);
-            date.setHours(i, 0, 0, 0);
-            const hourStr = date.toLocaleString("en-US", {
-              day: "numeric",
-              month: "short",
-              hour: "numeric",
-              hour12: true,
-            });
-            counts[hourStr] = 0;
-          }
-
-          // Initialize previous day's hours
-          for (let i = 0; i < 24; i++) {
-            const date = new Date(previousDateTime);
-            date.setHours(i, 0, 0, 0);
-            const hourStr = date.toLocaleString("en-US", {
-              day: "numeric",
-              month: "short",
-              hour: "numeric",
-              hour12: true,
-            });
-            previousCounts[hourStr] = 0;
-          }
-
-          // Count current period events
-          currentEvents.forEach((event: BaseEvent) => {
-            const date = new Date(event.block_timestamp * 1000);
-            const hourStr = date.toLocaleString("en-US", {
-              day: "numeric",
-              month: "short",
-              hour: "numeric",
-              hour12: true,
-            });
-            if (counts[hourStr] !== undefined) {
-              counts[hourStr] += 1;
-            }
-          });
-
-          previousEvents.forEach((event: BaseEvent) => {
-            const date = new Date(event.block_timestamp * 1000);
-            const hourStr = date.toLocaleString("en-US", {
-              day: "numeric",
-              month: "short",
-              hour: "numeric",
-              hour12: true,
-            });
-            if (previousCounts[hourStr] !== undefined) {
-              previousCounts[hourStr] += 1;
-            }
-          });
-        } else if (timeRange === "week") {
-          // Create array of last 7 days with exact timestamps for comparison
-          const dates = Array.from({ length: 7 }, (_, i) => {
-            const date = new Date(now * 1000 - (6 - i) * 24 * 60 * 60 * 1000);
-            // Set to start of day for consistent comparison
-            date.setHours(0, 0, 0, 0);
-            return {
-              timestamp: date.getTime(),
-              label: date.toLocaleString("en-US", {
-                weekday: "short",
-                month: "short",
-                day: "numeric",
-              }),
-            };
-          }).reverse();
-
-          // Initialize counts with 0
-          dates.forEach(({ label }) => {
-            counts[label] = 0;
-          });
-
-          // Count events by comparing dates at day level
-          currentEvents.forEach((event: BaseEvent) => {
-            const eventDate = new Date(event.block_timestamp * 1000);
-            eventDate.setHours(0, 0, 0, 0);
-            const eventTimestamp = eventDate.getTime();
-
-            // Find matching date
-            const matchingDate = dates.find(
-              (d) => d.timestamp === eventTimestamp
-            );
-            if (matchingDate) {
-              counts[matchingDate.label] += 1;
-            }
-          });
-
-          // Do the same for previous period
-          const previousDates = Array.from({ length: 7 }, (_, i) => {
-            const date = new Date(
-              (now - 7 * 24 * 60 * 60) * 1000 - (6 - i) * 24 * 60 * 60 * 1000
-            );
-            date.setHours(0, 0, 0, 0);
-            return {
-              timestamp: date.getTime(),
-              label: date.toLocaleString("en-US", {
-                weekday: "short",
-                month: "short",
-                day: "numeric",
-              }),
-            };
-          }).reverse();
-
-          previousDates.forEach(({ label }) => {
-            previousCounts[label] = 0;
-          });
-
-          previousEvents.forEach((event: BaseEvent) => {
-            const eventDate = new Date(event.block_timestamp * 1000);
-            eventDate.setHours(0, 0, 0, 0);
-            const eventTimestamp = eventDate.getTime();
-
-            const matchingDate = previousDates.find(
-              (d) => d.timestamp === eventTimestamp
-            );
-            if (matchingDate) {
-              previousCounts[matchingDate.label] += 1;
-            }
-          });
+        // Calculate time ranges for queries
+        let currentStart, currentEnd, previousStart, previousEnd;
+        
+        if (timeRange === TIME_RANGES.DAY && selectedDate) {
+          const { startOfDay, endOfDay } = getDateRange(selectedDate);
+          const { startOfDay: previousStartOfDay, endOfDay: previousEndOfDay } = getDateRange(selectedDate, -1);
+          
+          currentStart = startOfDay;
+          currentEnd = endOfDay;
+          previousStart = previousStartOfDay;
+          previousEnd = previousEndOfDay;
         } else {
-          // Month view
-          // Initialize current period days
-          for (let i = 29; i >= 0; i--) {
-            const date = new Date(now * 1000 - i * 24 * 60 * 60 * 1000);
-            const dayStr = date.toLocaleDateString("en-US", {
-              day: "numeric",
-              month: "short",
-            });
-            counts[dayStr] = 0;
-          }
-
-          for (let i = 29; i >= 0; i--) {
-            const date = new Date(
-              (now - 30 * 24 * 60 * 60) * 1000 - i * 24 * 60 * 60 * 1000
-            );
-            const dayStr = date.toLocaleDateString("en-US", {
-              day: "numeric",
-              month: "short",
-            });
-            previousCounts[dayStr] = 0;
-          }
-
-          // Count events for both periods
-          currentEvents.forEach((event: BaseEvent) => {
-            const date = new Date(event.block_timestamp * 1000);
-            const dayStr = date.toLocaleDateString("en-US", {
-              day: "numeric",
-              month: "short",
-            });
-            if (counts[dayStr] !== undefined) {
-              counts[dayStr] += 1;
-            }
-          });
-
-          previousEvents.forEach((event: BaseEvent) => {
-            const date = new Date(event.block_timestamp * 1000);
-            const dayStr = date.toLocaleDateString("en-US", {
-              day: "numeric",
-              month: "short",
-            });
-            if (previousCounts[dayStr] !== undefined) {
-              previousCounts[dayStr] += 1;
-            }
-          });
+          currentStart = 
+            timeRange === TIME_RANGES.DAY 
+              ? timeStamps.oneDayAgo 
+              : timeRange === TIME_RANGES.WEEK 
+                ? timeStamps.oneWeekAgo 
+                : timeStamps.oneMonthAgo;
+          
+          const periodLength = 
+            timeRange === TIME_RANGES.DAY 
+              ? 24 * 60 * 60 
+              : timeRange === TIME_RANGES.WEEK 
+                ? 7 * 24 * 60 * 60 
+                : 30 * 24 * 60 * 60;
+          
+          previousStart = currentStart - periodLength;
+          previousEnd = currentStart;
         }
 
-        setPreviousEventCounts(previousCounts);
-        setEventCounts(counts);
+        // Fetch current and previous period events
+        const [currentEvents, previousEvents] = await Promise.all([
+          fetchEventsWithPagination(
+            selectedEventFound.eventName,
+            selectedEventFound.contractType,
+            currentStart,
+            currentEnd
+          ),
+          fetchEventsWithPagination(
+            selectedEventFound.eventName,
+            selectedEventFound.contractType,
+            previousStart,
+            previousEnd
+          )
+        ]);
+
+        // Initialize data structures
+        const { counts, previousCounts } = initializeTimePeriodData(timeRange, selectedDate);
+
+        // Count events
+        const updatedCounts = countEvents(currentEvents, counts, timeRange);
+        const updatedPreviousCounts = countEvents(previousEvents, previousCounts, timeRange);
+
+        setPreviousEventCounts(updatedPreviousCounts);
+        setEventCounts(updatedCounts);
       } catch (error) {
         console.error("Error fetching data:", error);
       } finally {
@@ -353,80 +360,170 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
     };
 
     fetchData();
-  }, [timeRange, selectedEvent, selectedDate]);
+  }, [timeRange, selectedEventFound, selectedDate, fetchEventsWithPagination, 
+      getDateRange, initializeTimePeriodData, countEvents, timeStamps]);
 
-  // Transform the data for Recharts with reversed order for all time ranges
-  const chartData = Object.entries(eventCounts)
-    .map(([timeLabel, count]) => ({
-      timeLabel,
-      count:
-        timeRange === "day"
-          ? new Date(timeLabel).getHours() > new Date().getHours()
-            ? 0
-            : count
-          : count,
-      hour:
-        timeRange === "day"
-          ? (new Date(timeLabel).getHours() + 1) % 24
-          : new Date(timeLabel).getTime(),
-    }))
-    .sort((a, b) => {
-      if (timeRange === "day") {
-        const currentHour = (new Date().getHours() + 1) % 24;
-        const hourA = (a.hour - currentHour + 24) % 24;
-        const hourB = (b.hour - currentHour + 24) % 24;
-        // Invert the sort order for daily view
-        return hourA - hourB;
-      } else {
-        return (
-          new Date(a.timeLabel).getTime() - new Date(b.timeLabel).getTime()
-        );
-      }
-    });
+  // Process chart data (memoized to avoid recalculations)
+  const chartData = useMemo(() => {
+    // Transform the data for Recharts
+    const data = Object.entries(eventCounts)
+      .map(([timeLabel, count]) => ({
+        timeLabel,
+        count:
+          timeRange === TIME_RANGES.DAY
+            ? new Date(timeLabel).getHours() > new Date().getHours()
+              ? 0
+              : count
+            : count,
+        hour:
+          timeRange === TIME_RANGES.DAY
+            ? (new Date(timeLabel).getHours() + 1) % 24
+            : new Date(timeLabel).getTime(),
+      }))
+      .sort((a, b) => {
+        if (timeRange === TIME_RANGES.DAY) {
+          const currentHour = (new Date().getHours() + 1) % 24;
+          const hourA = (a.hour as number - currentHour + 24) % 24;
+          const hourB = (b.hour as number - currentHour + 24) % 24;
+          return hourA - hourB;
+        } else {
+          return (
+            new Date(a.timeLabel).getTime() - new Date(b.timeLabel).getTime()
+          );
+        }
+      });
 
-  const previousChartData = Object.entries(previousEventCounts)
-    .map(([timeLabel, count]) => ({
-      timeLabel,
-      previousCount:
-        timeRange === "day"
-          ? new Date(timeLabel).getHours() > new Date().getHours()
-            ? 0
-            : count
-          : count,
-      hour:
-        timeRange === "day"
-          ? (new Date(timeLabel).getHours() + 1) % 24
-          : new Date(timeLabel).getTime(),
-    }))
-    .sort((a, b) => {
-      if (timeRange === "day") {
-        const currentHour = (new Date().getHours() + 1) % 24;
-        const hourA = (a.hour - currentHour + 24) % 24;
-        const hourB = (b.hour - currentHour + 24) % 24;
-        // Invert the sort order for daily view
-        return hourA - hourB;
-      } else {
-        return (
-          new Date(a.timeLabel).getTime() - new Date(b.timeLabel).getTime()
-        );
-      }
-    });
+    const previousData = Object.entries(previousEventCounts)
+      .map(([timeLabel, count]) => ({
+        timeLabel,
+        previousCount:
+          timeRange === TIME_RANGES.DAY
+            ? new Date(timeLabel).getHours() > new Date().getHours()
+              ? 0
+              : count
+            : count,
+        hour:
+          timeRange === TIME_RANGES.DAY
+            ? (new Date(timeLabel).getHours() + 1) % 24
+            : new Date(timeLabel).getTime(),
+      }))
+      .sort((a, b) => {
+        if (timeRange === TIME_RANGES.DAY) {
+          const currentHour = (new Date().getHours() + 1) % 24;
+          const hourA = (a.hour as number - currentHour + 24) % 24;
+          const hourB = (b.hour as number - currentHour + 24) % 24;
+          return hourA - hourB;
+        } else {
+          return (
+            new Date(a.timeLabel).getTime() - new Date(b.timeLabel).getTime()
+          );
+        }
+      });
 
-  // Merge current and previous data
-  const mergedChartData =
-    timeRange === "day"
-      ? chartData.map((current, index) => ({
+    // Merge current and previous data
+    return timeRange === TIME_RANGES.DAY
+      ? data.map((current, index) => ({
           timeLabel: current.timeLabel,
           count: current.count,
-          previousCount: previousChartData[index]?.previousCount || 0,
+          previousCount: previousData[index]?.previousCount || 0,
         }))
-      : chartData.map((current, index) => ({
+      : data.map((current, index) => ({
           timeLabel: current.timeLabel,
-          count: chartData[chartData.length - 1 - index].count,
+          count: data[data.length - 1 - index].count,
           previousCount:
-            previousChartData[previousChartData.length - 1 - index]
-              ?.previousCount || 0,
+            previousData[previousData.length - 1 - index]?.previousCount || 0,
         }));
+  }, [eventCounts, previousEventCounts, timeRange]);
+
+  // Calculate total events and percentage change
+  const totals = useMemo(() => {
+    const currentTotal = Object.values(eventCounts).reduce(
+      (sum, count) => sum + count,
+      0
+    );
+    const previousTotal = Object.values(previousEventCounts).reduce(
+      (sum, count) => sum + count,
+      0
+    );
+
+    const percentageChange =
+      previousTotal === 0
+        ? currentTotal > 0 ? 100 : 0
+        : ((currentTotal - previousTotal) / previousTotal) * 100;
+
+    return {
+      currentTotal,
+      previousTotal,
+      percentageChange,
+      isPositive: percentageChange > 0
+    };
+  }, [eventCounts, previousEventCounts]);
+
+  // Custom tooltip component
+  const CustomTooltip = ({ active, payload, label }: any) => {
+    if (active && payload && payload.length > 0) {
+      // Convert label to Date object
+      const labelDate = new Date(label);
+      let previousDate = "";
+      let formattedLabel = "";
+
+      if (timeRange === TIME_RANGES.WEEK || timeRange === TIME_RANGES.MONTH) {
+        const prevDate = new Date(labelDate);
+        if (timeRange === TIME_RANGES.WEEK) {
+          prevDate.setDate(prevDate.getDate() - 7);
+        } else {
+          prevDate.setMonth(prevDate.getMonth() - 1);
+        }
+        previousDate = prevDate.toLocaleDateString("en-GB", {
+          day: "numeric",
+          month: "short",
+        });
+
+        formattedLabel = labelDate.toLocaleDateString("en-GB", {
+          day: "numeric",
+          month: "short",
+        });
+      }
+
+      return (
+        <div
+          style={{
+            backgroundColor: "white",
+            padding: "10px",
+            border: "1px solid #ccc",
+            borderRadius: "4px",
+          }}
+        >
+          <p>
+            <span style={{ color: "#FF8C00" }}>
+              Current Period: {payload[0].value}
+            </span>
+            <span style={{ color: "#000" }}>
+              {formattedLabel ? ` ${formattedLabel}` : ` ${label}`}
+            </span>
+          </p>
+          {showPreviousPeriod && (
+            <p>
+              <span style={{ color: "#FF8C00" }}>
+                Previous Period: {payload[1]?.value || 0}
+              </span>
+              <span style={{ color: "#000" }}>{previousDate ? ` ${previousDate}` : ""}</span>
+            </p>
+          )}
+        </div>
+      );
+    }
+    return null;
+  };
+
+  // Component for stats cards
+  
+
+  // Handle date selection
+  const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setSelectedDate(e.target.value);
+    setTimeRange(TIME_RANGES.DAY); // Automatically switch to day view when date is selected
+  };
 
   return (
     <div>
@@ -449,12 +546,10 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
             }}
           >
             Ostium Event Dashboard -{" "}
-            <a href="https://arbiscan.io/address/0x20D419a8e12C45f88fDA7c5760bb6923Cee27F98#events">
-            0x20D419a8e12C45f88fDA7c5760bb6923Cee27F98
+            <a href={`https://arbiscan.io/address/${CONTRACT_ADDRESS}#events`}>
+              {CONTRACT_ADDRESS}
             </a>
           </h1>
-
-          {/* <p>Your ultimate analytics dashboard for smarter decisions! 🚀📊</p> */}
         </div>
 
         <div
@@ -466,151 +561,31 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
           }}
         >
           {/* Last 30min Stats */}
-          <div
-            style={{
-              padding: "16px",
-              borderRadius: "8px",
-              backgroundColor: "#f8f9fa",
-              border: "1px solid #e9ecef",
-              boxShadow: "0 2px 4px rgba(0,0,0,0.05)",
-            }}
-          >
-            <div
-              style={{
-                fontSize: "14px",
-                color: "#6c757d",
-                marginBottom: "4px",
-              }}
-            >
-              Last 30 Minutes
-            </div>
-            <div
-              style={{ fontSize: "24px", fontWeight: "bold", color: "#FF8C00" }}
-            >
-              {last30MinCount}
-            </div>
-            <div style={{ fontSize: "12px", color: "#6c757d" }}>events</div>
-          </div>
+          <StatCard
+            title="Last 30 Minutes"
+            value={last30MinCount}
+            subtitle="events"
+          />
 
           {/* Current Period Stats */}
-          <div
-            style={{
-              padding: "16px",
-              borderRadius: "8px",
-              backgroundColor: "#f8f9fa",
-              border: "1px solid #e9ecef",
-              boxShadow: "0 2px 4px rgba(0,0,0,0.05)",
-            }}
-          >
-            <div
-              style={{
-                fontSize: "14px",
-                color: "#6c757d",
-                marginBottom: "4px",
-              }}
-            >
-              {selectedEventFound.contractType} {selectedEventFound.eventName}{" "}
-              Events
-            </div>
-            <div
-              style={{ fontSize: "24px", fontWeight: "bold", color: "#FF8C00" }}
-            >
-              {Object.values(eventCounts).reduce(
-                (sum, count) => sum + count,
-                0
-              )}
-            </div>
-            <div style={{ fontSize: "12px", color: "#6c757d" }}>
-              current period
-            </div>
-          </div>
+          <StatCard
+            title={`Total ${selectedEventFound.eventName} Events`}
+            value={totals.currentTotal}
+            subtitle="current period"
+          />
 
           {/* Percentage Change Stats */}
           {showPreviousPeriod && (
-            <div
-              style={{
-                padding: "16px",
-                borderRadius: "8px",
-                backgroundColor: "#f8f9fa",
-                border: "1px solid #e9ecef",
-                boxShadow: "0 2px 4px rgba(0,0,0,0.05)",
-              }}
-            >
-              <div
-                style={{
-                  fontSize: "14px",
-                  color: "#6c757d",
-                  marginBottom: "4px",
-                }}
-              >
-                Period over Period
-              </div>
-              {(() => {
-                const currentTotal = Object.values(eventCounts).reduce(
-                  (sum, count) => sum + count,
-                  0
-                );
-                const previousTotal = Object.values(previousEventCounts).reduce(
-                  (sum, count) => sum + count,
-                  0
-                );
-
-                // If both periods have all zeros, return 0%
-                if (currentTotal === 0 && previousTotal === 0) {
-                  return (
-                    <>
-                      <div
-                        style={{
-                          fontSize: "24px",
-                          fontWeight: "bold",
-                          color: "#6c757d", // grey color
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "4px",
-                        }}
-                      >
-                        0%
-                      </div>
-                      <div style={{ fontSize: "12px", color: "#6c757d" }}>
-                        change
-                      </div>
-                    </>
-                  );
-                }
-
-                const percentageChange =
-                  previousTotal === 0
-                    ? 100
-                    : ((currentTotal - previousTotal) / previousTotal) * 100;
-                const isPositive = percentageChange > 0;
-
-                return (
-                  <>
-                    <div
-                      style={{
-                        fontSize: "24px",
-                        fontWeight: "bold",
-                        color: isPositive ? "#22c55e" : "#ef4444",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "4px",
-                      }}
-                    >
-                      {isPositive ? "+" : ""}
-                      {percentageChange.toFixed(1)}%
-                      {isPositive ? (
-                        <span style={{ fontSize: "20px" }}>↑</span>
-                      ) : (
-                        <span style={{ fontSize: "20px" }}>↓</span>
-                      )}
-                    </div>
-                    <div style={{ fontSize: "12px", color: "#6c757d" }}>
-                      change
-                    </div>
-                  </>
-                );
-              })()}
-            </div>
+            <StatCard
+              title="Period over Period"
+              value={totals.currentTotal === 0 && totals.previousTotal === 0 
+                ? "0%" 
+                : `${totals.isPositive ? "+" : ""}${totals.percentageChange.toFixed(1)}% ${totals.isPositive ? "↑" : "↓"}`}
+              subtitle="change"
+              color={totals.currentTotal === 0 && totals.previousTotal === 0 
+                ? "#6c757d" 
+                : totals.isPositive ? "#22c55e" : "#ef4444"}
+            />
           )}
         </div>
 
@@ -620,6 +595,7 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
             gap: "12px",
             alignItems: "center",
             justifyContent: "flex-end",
+            flexWrap: "wrap",
           }}
         >
           <span style={{ fontSize: "14px", color: "#666" }}>Event Type:</span>
@@ -649,9 +625,7 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
           </span>
           <select
             value={timeRange}
-            onChange={(e) =>
-              setTimeRange(e.target.value as "day" | "week" | "month")
-            }
+            onChange={(e) => setTimeRange(e.target.value as "day" | "week" | "month")}
             style={{
               padding: "8px 12px",
               borderRadius: "6px",
@@ -662,10 +636,11 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
               outline: "none",
               minWidth: "120px",
             }}
+            // Option drop down
           >
-            <option value="day">Last 24 Hours</option>
-            <option value="week">Last Week</option>
-            <option value="month">Last Month</option>
+            <option value={TIME_RANGES.DAY}>Last 24 Hours</option>
+            <option value={TIME_RANGES.WEEK}>Last Week</option>
+            <option value={TIME_RANGES.MONTH}>Last Month</option>
           </select>
 
           <span style={{ fontSize: "14px", color: "#666", marginLeft: "12px" }}>
@@ -674,10 +649,7 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
           <input
             type="date"
             value={selectedDate}
-            onChange={(e) => {
-              setSelectedDate(e.target.value);
-              setTimeRange("day"); // Automatically switch to day view when date is selected
-            }}
+            onChange={handleDateChange}
             style={{
               padding: "8px 12px",
               borderRadius: "6px",
@@ -724,11 +696,11 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
             color: "#333",
           }}
         >
-          {selectedEvent} Events
+          {selectedEventFound.label || "Event"} Events
         </h1>
         <p>
           View the number of{" "}
-          <span style={{ color: "#FF8C00" }}>{selectedEvent}</span> events over
+          <span style={{ color: "#FF8C00" }}>{selectedEventFound.label || selectedEvent}</span> events over
           time.
         </p>
       </div>
@@ -736,9 +708,10 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
         {isLoading ? (
           <div
             style={{
-              position: "absolute",
-              top: "50%",
-              left: "50%",
+              display: "flex",
+              justifyContent: "center",
+              alignItems: "center",
+              height: "100%",
             }}
           >
             <Loader />
@@ -746,7 +719,7 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
         ) : (
           <ResponsiveContainer>
             <LineChart
-              data={mergedChartData}
+              data={chartData}
               margin={{ top: 20, right: 30, left: 20, bottom: 20 }}
             >
               <XAxis
@@ -758,7 +731,7 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
                 tick={{ fontSize: 12 }}
               />
               <YAxis />
-              {timeRange === "day" && (
+              {timeRange === TIME_RANGES.DAY && (
                 <ReferenceLine
                   x={new Date().toLocaleString("en-US", {
                     day: "numeric",
@@ -776,94 +749,7 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
                   }}
                 />
               )}
-              <Tooltip
-                content={({ active, payload, label }) => {
-                  if (active && payload && payload.length > 0) {
-                    let previousDate = "";
-                    let formattedLabel = "";
-
-                    // Convert label to Date object
-                    const labelDate = new Date(label);
-
-                    // Extracting the hour directly from the label
-                  
-
-                    if (timeRange === "day") {
-              
-                      // Previous period should be the same hour on the previous day
-
-  
-
-                      // Current label time (hovered time)
-          
-                    } else if (timeRange === "week") {
-                      // Previous period should be the same day of the week from last week
-                      const prevWeek = new Date(
-                        labelDate.getTime() - 7 * 24 * 60 * 60 * 1000
-                      );
-                      previousDate = prevWeek.toLocaleDateString("en-GB", {
-                        day: "numeric",
-                        month: "short",
-                      });
-
-                      // Format the current label as a short date
-                      formattedLabel = labelDate.toLocaleDateString("en-GB", {
-                        day: "numeric",
-                        month: "short",
-                      });
-                    } else if (timeRange === "month") {
-                      // Previous period should be the same day from the previous month
-                      const prevMonth = new Date(labelDate);
-                      prevMonth.setMonth(prevMonth.getMonth() - 1);
-                      previousDate = prevMonth.toLocaleDateString("en-GB", {
-                        day: "numeric",
-                        month: "short",
-                      });
-
-                      // Format the current label as a short date
-                      formattedLabel = labelDate.toLocaleDateString("en-GB", {
-                        day: "numeric",
-                        month: "short",
-                      });
-                    }
-
-                    return (
-                      <div
-                        style={{
-                          backgroundColor: "white",
-                          padding: "10px",
-                          border: "1px solid #ccc",
-                          borderRadius: "4px",
-                        }}
-                      >
-                        <p>
-                          <span style={{ color: "#FF8C00" }}>
-                            Current Period: {payload[0].value}
-                          </span>
-                          <span style={{ color: "#000" }}>
-                            {timeRange === "day"
-                              ? ` ${formattedLabel}`
-                              : ` ${formattedLabel}`}
-                          </span>
-                        </p>
-                        {showPreviousPeriod && (
-                          <p>
-                            <span style={{ color: "#FF8C00" }}>
-                              Previous Period: {payload[1]?.value || 0}
-                            </span>
-                            <span style={{ color: "#000" }}>
-                              {" "}
-                              {previousDate}
-                            </span>
-                          </p>
-                        )}
-                      </div>
-                    );
-                  }
-                  return null;
-                }}
-              />
-
+              <Tooltip content={CustomTooltip} />
               <Line
                 type="monotone"
                 dataKey="count"
