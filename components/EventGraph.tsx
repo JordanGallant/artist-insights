@@ -10,12 +10,11 @@ import {
   Tooltip,
   ResponsiveContainer,
   ReferenceLine,
-  TooltipProps,
 } from "recharts";
 import BottomDiv from "./BottomDiv";
 import Loader from "./Loader";
 import StatCard from "./StatCard"
-import { NameType, ValueType } from "recharts/types/component/DefaultTooltipContent";
+import CustomTooltip from "./CustomTooltip";
 
 // Move interfaces to their own section for better organization
 interface BaseEvent {
@@ -150,7 +149,7 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
       const selectedDateTime = new Date(startOfDay * 1000);
       const previousDateTime = new Date(prevStartOfDay * 1000);
 
-      // Initialize hours for selected date
+      // Initialize hours for selected date (DAILY)
       for (let i = 0; i < 24; i++) {
         const date = new Date(selectedDateTime);
         date.setHours(i, 0, 0, 0);
@@ -176,7 +175,7 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
         previousCounts[hourStr] = 0;
       }
     } else if (timeRange === TIME_RANGES.WEEK) {
-      // Create array of last 7 days with exact timestamps
+      // Create array of last 7 days with exact timestamps (WEEKLY)
       const dates = Array.from({ length: 7 }, (_, i) => {
         const date = new Date(now.getTime() - (6 - i) * 24 * 60 * 60 * 1000);
         date.setHours(0, 0, 0, 0);
@@ -454,66 +453,6 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
     };
   }, [eventCounts, previousEventCounts]);
 
-  // Custom tooltip component
-  const CustomTooltip = ({
-    active,
-    payload,
-    label,
-  }: TooltipProps<ValueType, NameType>) => {
-    if (active && payload && payload.length > 0) {
-      const labelDate = new Date(label as string);
-      let previousDate = "";
-      let formattedLabel = "";
-
-      if (timeRange === TIME_RANGES.WEEK || timeRange === TIME_RANGES.MONTH) {
-        const prevDate = new Date(labelDate);
-        if (timeRange === TIME_RANGES.WEEK) {
-          prevDate.setDate(prevDate.getDate() - 7);
-        } else {
-          prevDate.setMonth(prevDate.getMonth() - 1);
-        }
-        previousDate = prevDate.toLocaleDateString("en-GB", {
-          day: "numeric",
-          month: "short",
-        });
-
-        formattedLabel = labelDate.toLocaleDateString("en-GB", {
-          day: "numeric",
-          month: "short",
-        });
-      }
-
-      return (
-        <div
-          style={{
-            backgroundColor: "white",
-            padding: "10px",
-            border: "1px solid #ccc",
-            borderRadius: "4px",
-          }}
-        >
-          <p>
-            <span style={{ color: "#FF8C00" }}>
-              Current Period: {payload[0].value}
-            </span>
-            <span style={{ color: "#000" }}>
-              {formattedLabel ? ` ${formattedLabel}` : ` ${label}`}
-            </span>
-          </p>
-          {showPreviousPeriod && (
-            <p>
-              <span style={{ color: "#FF8C00" }}>
-                Previous Period: {payload[1]?.value || 0}
-              </span>
-              <span style={{ color: "#000" }}>{previousDate ? ` ${previousDate}` : ""}</span>
-            </p>
-          )}
-        </div>
-      );
-    }
-    return null;
-  };
-
   // Handle date selection
   const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setSelectedDate(e.target.value);
@@ -744,7 +683,14 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
                   }}
                 />
               )}
-              <Tooltip content={CustomTooltip} />
+              <Tooltip 
+                content={
+                  <CustomTooltip 
+                    timeRange={timeRange} 
+                    showPreviousPeriod={showPreviousPeriod} 
+                  />
+                } 
+              />
               <Line
                 type="monotone"
                 dataKey="count"
