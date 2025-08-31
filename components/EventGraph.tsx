@@ -14,6 +14,7 @@ import {
 import Loader from "./Loader";
 import StatCard from "./StatCard"
 import CustomTooltip from "./CustomTooltip";
+import ArtistsTable from "./ArtistTable";
 
 // Move interfaces to their own section for better organization
 interface Artist {
@@ -710,8 +711,10 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
               )}
             </LineChart>
           </ResponsiveContainer>
+          
         )}
       </div>
+      <ArtistsTable/>
     </div>
   );
 };
