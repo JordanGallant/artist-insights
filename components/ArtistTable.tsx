@@ -1,6 +1,5 @@
 "use client";
 import React, { useEffect, useState, useMemo } from "react";
-import { graphqlClient } from "../lib/graphql";
 import Loader from "./Loader";
 
 // Interface for Artist data
@@ -25,20 +24,6 @@ interface Artist {
   _status: string;
 }
 
-interface ArtistsResponse {
-  Artists: {
-    docs: Artist[];
-    totalDocs: number;
-    limit: number;
-    totalPages: number;
-    page: number;
-    pagingCounter: number;
-    hasPrevPage: boolean;
-    hasNextPage: boolean;
-    prevPage?: number;
-    nextPage?: number;
-  };
-}
 
 const ArtistsTable: React.FC = () => {
   const [artists, setArtists] = useState<Artist[]>([]);
@@ -91,12 +76,31 @@ const ArtistsTable: React.FC = () => {
           }
         `;
 
-        const response = await graphqlClient.request<ArtistsResponse>(query, {
-          page,
-          limit: 100
+        const response = await fetch('/api/graphql', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            query,
+            variables: {
+              page,
+              limit: 100
+            }
+          })
         });
 
-        const artistsData = response.Artists;
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const result = await response.json();
+        
+        if (result.errors) {
+                throw new Error(`GraphQL error: ${result.errors.map((e: { message: string }) => e.message).join(', ')}`);
+        }
+
+        const artistsData = result.data.Artists;
         allArtists = [...allArtists, ...artistsData.docs];
 
         if (!artistsData.hasNextPage) {

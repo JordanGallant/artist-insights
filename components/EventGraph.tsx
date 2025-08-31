@@ -1,6 +1,5 @@
 "use client";
 import React, { useEffect, useState, useMemo, useCallback } from "react";
-import { graphqlClient } from "../lib/graphql";
 import { EventType } from "../app/types";
 import {
   LineChart,
@@ -38,21 +37,6 @@ interface Artist {
   _status: string;
 }
 
-interface ArtistsResponse {
-  Artists: {
-    docs: Artist[];
-    totalDocs: number;
-    limit: number;
-    totalPages: number;
-    page: number;
-    pagingCounter: number;
-    hasPrevPage: boolean;
-    hasNextPage: boolean;
-    prevPage?: number;
-    nextPage?: number;
-  };
-}
-
 interface EventGraphProps {
   eventTypes: EventType[];
 }
@@ -78,8 +62,6 @@ const EventGraph: React.FC<EventGraphProps> = () => {
   const [artists, setArtists] = useState<Artist[]>([]);
 
   // Memoize the selected event to prevent unnecessary recalculations
-
-
   // Calculate timestamps based on the current time (memoized to avoid recalculations)
   const timeStamps = useMemo(() => {
     const now = Math.floor(Date.now() / 1000);
@@ -132,12 +114,31 @@ const EventGraph: React.FC<EventGraphProps> = () => {
       `;
 
       try {
-        const response = await graphqlClient.request<ArtistsResponse>(query, {
-          page,
-          limit: 100
+        const response = await fetch('/api/graphql', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            query,
+            variables: {
+              page,
+              limit: 100
+            }
+          })
         });
 
-        const artistsData = response.Artists;
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const result = await response.json();
+        
+        if (result.errors) {
+          throw new Error(`GraphQL error: ${result.errors.map((e: { message: string }) => e.message).join(', ')}`);
+        }
+
+        const artistsData = result.data.Artists;
         allArtists = [...allArtists, ...artistsData.docs];
 
         if (!artistsData.hasNextPage) {
@@ -707,9 +708,9 @@ const EventGraph: React.FC<EventGraphProps> = () => {
               )}
             </LineChart>
           </ResponsiveContainer>
-          
         )}
       </div>
+
       <ArtistsTable/>
     </div>
   );
