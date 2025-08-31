@@ -120,7 +120,7 @@ const ArtistsTable: React.FC = () => {
 
   // Filter and sort artists
   const filteredAndSortedArtists = useMemo(() => {
-    let filtered = artists.filter((artist) =>
+    const filtered = artists.filter((artist) =>
       artist.artistName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       artist.slug?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       artist.tagline?.toLowerCase().includes(searchTerm.toLowerCase())

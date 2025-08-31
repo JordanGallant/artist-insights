@@ -64,13 +64,12 @@ const TIME_RANGES = {
   MONTH: "month" as const,
 };
 
-const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
+const EventGraph: React.FC<EventGraphProps> = () => {
   // State management
   const [eventCounts, setEventCounts] = useState<Record<string, number>>({});
   const [previousEventCounts, setPreviousEventCounts] = useState<Record<string, number>>({});
   const [last30MinCount, setLast30MinCount] = useState<number>(0);
   const [timeRange, setTimeRange] = useState<"day" | "week" | "month">(TIME_RANGES.WEEK);
-  const [selectedEvent, setSelectedEvent] = useState<string>("");
   const [showPreviousPeriod, setShowPreviousPeriod] = useState(true);
   const [selectedDate, setSelectedDate] = useState<string>(
     new Date().toISOString().split("T")[0]
@@ -79,10 +78,7 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
   const [artists, setArtists] = useState<Artist[]>([]);
 
   // Memoize the selected event to prevent unnecessary recalculations
-  const selectedEventFound = useMemo(() => 
-    eventTypes.find((event) => event.id === selectedEvent) || 
-    { id: "", eventName: "", label: "", contractType: "" },
-  [selectedEvent, eventTypes]);
+
 
   // Calculate timestamps based on the current time (memoized to avoid recalculations)
   const timeStamps = useMemo(() => {
