@@ -11,21 +11,45 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from "recharts";
-import BottomDiv from "./BottomDiv";
 import Loader from "./Loader";
 import StatCard from "./StatCard"
 import CustomTooltip from "./CustomTooltip";
 
 // Move interfaces to their own section for better organization
-interface BaseEvent {
-  db_write_timestamp: string;
-  block_timestamp: number;
-  event_name: string;
-  contract_name: string;
+interface Artist {
+  id: string;
+  artistName: string;
+  slug: string;
+  artistResident: boolean;
+  intro?: string;
+  biography?: string;
+  tagline?: string;
+  dateCreated?: string;
+  instagram?: string;
+  soundcloud?: string;
+  twitter?: string;
+  youtube?: string;
+  facebook?: string;
+  mixcloud?: string;
+  website?: string;
+  updatedAt: string;
+  createdAt: string;
+  _status: string;
 }
 
-interface EventsResponse {
-  raw_events: BaseEvent[];
+interface ArtistsResponse {
+  Artists: {
+    docs: Artist[];
+    totalDocs: number;
+    limit: number;
+    totalPages: number;
+    page: number;
+    pagingCounter: number;
+    hasPrevPage: boolean;
+    hasNextPage: boolean;
+    prevPage?: number;
+    nextPage?: number;
+  };
 }
 
 interface EventGraphProps {
@@ -33,7 +57,6 @@ interface EventGraphProps {
 }
 
 // Constants extracted to the top level
-const CONTRACT_ADDRESS = "0x20D419a8e12C45f88fDA7c5760bb6923Cee27F98";
 const TIME_RANGES = {
   DAY: "day" as const,
   WEEK: "week" as const,
@@ -52,6 +75,7 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
     new Date().toISOString().split("T")[0]
   );
   const [isLoading, setIsLoading] = useState(false);
+  const [artists, setArtists] = useState<Artist[]>([]);
 
   // Memoize the selected event to prevent unnecessary recalculations
   const selectedEventFound = useMemo(() => 
@@ -71,58 +95,84 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
     };
   }, []);
 
-  // Extract the fetchEventsWithPagination function to improve readability
-  const fetchEventsWithPagination = useCallback(async (
-    eventName: string,
-    contractType: string,
-    startTime: number,
-    endTime?: number
-  ) => {
-    let allEvents: BaseEvent[] = [];
-    let offset = 0;
+  // Fetch all artists from the API
+  const fetchAllArtists = useCallback(async () => {
+    let allArtists: Artist[] = [];
+    let page = 1;
     let hasMore = true;
 
     while (hasMore) {
-      //Query
-      const paginatedQuery = `
-        query Events {
-          raw_events(
-            where: {
-              event_name: {_eq: "${eventName}"}, 
-              contract_name: {_eq: "${contractType}"},
-              block_timestamp: {_gte: ${startTime}${
-                endTime ? `, _lt: ${endTime}` : ""
-              }}
+      const query = `
+        query GetArtists($page: Int, $limit: Int) {
+          Artists(page: $page, limit: $limit) {
+            docs {
+              id
+              artistName
+              slug
+              artistResident
+              intro
+              biography
+              tagline
+              dateCreated
+              instagram
+              soundcloud
+              twitter
+              youtube
+              facebook
+              mixcloud
+              website
+              updatedAt
+              createdAt
+              _status
             }
-            order_by: {block_timestamp: asc}
-            limit: 1000
-            offset: ${offset}
-          ) {
-            block_timestamp
-            event_name
-            contract_name
+            totalDocs
+            limit
+            totalPages
+            page
+            hasNextPage
           }
         }
       `;
 
       try {
-        const response = await graphqlClient.request<EventsResponse>(paginatedQuery);
-        const events = response.raw_events || [];
+        const response = await graphqlClient.request<ArtistsResponse>(query, {
+          page,
+          limit: 100
+        });
 
-        allEvents = [...allEvents, ...events];
+        const artistsData = response.Artists;
+        allArtists = [...allArtists, ...artistsData.docs];
 
-        if (events.length < 1000) {
+        if (!artistsData.hasNextPage) {
           hasMore = false;
         } else {
-          offset += 1000;
+          page++;
         }
       } catch (error) {
-        console.error("Error in pagination query:", error);
+        console.error("Error fetching artists:", error);
         hasMore = false;
       }
     }
 
-    return allEvents;
+    return allArtists;
+  }, []);
+
+  // Function to filter artists based on time ranges and criteria
+  const filterArtistsByTime = useCallback((
+    artists: Artist[],
+    startTime: number,
+    endTime?: number
+  ): Artist[] => {
+    return artists.filter((artist) => {
+      // Use createdAt or dateCreated for filtering
+      const artistDate = new Date(artist.dateCreated || artist.createdAt);
+      const artistTimestamp = Math.floor(artistDate.getTime() / 1000);
+      
+      if (endTime) {
+        return artistTimestamp >= startTime && artistTimestamp < endTime;
+      }
+      return artistTimestamp >= startTime;
+    });
   }, []);
 
   // Helper function to calculate date ranges
@@ -236,14 +286,14 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
     return { counts, previousCounts };
   }, [getDateRange]);
 
-  // Function to count events and populate data structures
-  const countEvents = useCallback((
-    events: BaseEvent[], 
+  // Function to count artists and populate data structures
+  const countArtists = useCallback((
+    artists: Artist[], 
     countMap: Record<string, number>,
     timeRange: "day" | "week" | "month"
   ) => {
-    events.forEach((event: BaseEvent) => {
-      const date = new Date(event.block_timestamp * 1000);
+    artists.forEach((artist: Artist) => {
+      const date = new Date(artist.dateCreated || artist.createdAt);
       
       let timeLabel;
       if (timeRange === TIME_RANGES.DAY) {
@@ -277,19 +327,16 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
 
   // Main data fetching function
   useEffect(() => {
-    // Skip if no event is selected
-    if (!selectedEventFound.eventName) return;
-    
     const fetchData = async () => {
       setIsLoading(true);
       try {
-        // Fetch last 30 minutes data
-        const last30MinEvents = await fetchEventsWithPagination(
-          selectedEventFound.eventName,
-          selectedEventFound.contractType,
-          timeStamps.thirtyMinutesAgo
-        );
-        setLast30MinCount(last30MinEvents.length);
+        // Fetch all artists first
+        const allArtists = await fetchAllArtists();
+        setArtists(allArtists);
+
+        // Filter for last 30 minutes (using created date)
+        const last30MinArtists = filterArtistsByTime(allArtists, timeStamps.thirtyMinutesAgo);
+        setLast30MinCount(last30MinArtists.length);
 
         // Calculate time ranges for queries
         let currentStart, currentEnd, previousStart, previousEnd;
@@ -321,28 +368,16 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
           previousEnd = currentStart;
         }
 
-        // Fetch current and previous period events
-        const [currentEvents, previousEvents] = await Promise.all([
-          fetchEventsWithPagination(
-            selectedEventFound.eventName,
-            selectedEventFound.contractType,
-            currentStart,
-            currentEnd
-          ),
-          fetchEventsWithPagination(
-            selectedEventFound.eventName,
-            selectedEventFound.contractType,
-            previousStart,
-            previousEnd
-          )
-        ]);
+        // Filter artists for current and previous periods
+        const currentArtists = filterArtistsByTime(allArtists, currentStart, currentEnd);
+        const previousArtists = filterArtistsByTime(allArtists, previousStart, previousEnd);
 
         // Initialize data structures
         const { counts, previousCounts } = initializeTimePeriodData(timeRange, selectedDate);
 
-        // Count events
-        const updatedCounts = countEvents(currentEvents, counts, timeRange);
-        const updatedPreviousCounts = countEvents(previousEvents, previousCounts, timeRange);
+        // Count artists
+        const updatedCounts = countArtists(currentArtists, counts, timeRange);
+        const updatedPreviousCounts = countArtists(previousArtists, previousCounts, timeRange);
 
         setPreviousEventCounts(updatedPreviousCounts);
         setEventCounts(updatedCounts);
@@ -354,8 +389,8 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
     };
 
     fetchData();
-  }, [timeRange, selectedEventFound, selectedDate, fetchEventsWithPagination, 
-      getDateRange, initializeTimePeriodData, countEvents, timeStamps]);
+  }, [timeRange, selectedDate, fetchAllArtists, filterArtistsByTime,
+      getDateRange, initializeTimePeriodData, countArtists, timeStamps]);
 
   // Process chart data (memoized to avoid recalculations)
   const chartData = useMemo(() => {
@@ -471,21 +506,6 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
           boxShadow: "0 1px 3px rgba(0,0,0,0.05)",
         }}
       >
-        <div style={{ textAlign: "center", marginBottom: "16px" }}>
-          <h1
-            style={{
-              fontSize: "24px",
-              fontWeight: "600",
-              color: "#333",
-            }}
-          >
-            Ostium Event Dashboard -{" "}
-            <a href={`https://arbiscan.io/address/${CONTRACT_ADDRESS}#events`}>
-              {CONTRACT_ADDRESS}
-            </a>
-          </h1>
-        </div>
-
         <div
           style={{
             display: "grid",
@@ -498,14 +518,21 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
           <StatCard
             title="Last 30 Minutes"
             value={last30MinCount}
-            subtitle="events"
+            subtitle="new artists"
           />
 
           {/* Current Period Stats */}
           <StatCard
-            title={`Total ${selectedEventFound.eventName} Events`}
+            title="Total Artists Created"
             value={totals.currentTotal}
             subtitle="current period"
+          />
+
+          {/* Total Artists */}
+          <StatCard
+            title="Total Artists"
+            value={artists.length}
+            subtitle="all time"
           />
 
           {/* Percentage Change Stats */}
@@ -532,28 +559,6 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
             flexWrap: "wrap",
           }}
         >
-          <span style={{ fontSize: "14px", color: "#666" }}>Event Type:</span>
-          <select
-            value={selectedEventFound.id}
-            onChange={(e) => setSelectedEvent(e.target.value)}
-            style={{
-              padding: "8px 12px",
-              borderRadius: "6px",
-              border: "1px solid #e0e0e0",
-              fontSize: "14px",
-              backgroundColor: "white",
-              cursor: "pointer",
-              outline: "none",
-              minWidth: "120px",
-            }}
-          >
-            {eventTypes.map((event) => (
-              <option key={event.label} value={event.id}>
-                {event.label}
-              </option>
-            ))}
-          </select>
-
           <span style={{ fontSize: "14px", color: "#666", marginLeft: "12px" }}>
             Time Range:
           </span>
@@ -570,7 +575,6 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
               outline: "none",
               minWidth: "120px",
             }}
-            // Option drop down
           >
             <option value={TIME_RANGES.DAY}>Last 24 Hours</option>
             <option value={TIME_RANGES.WEEK}>Last Week</option>
@@ -630,12 +634,10 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
             color: "#333",
           }}
         >
-          {selectedEventFound.label || "Event"} Events
+          Artists Created Over Time
         </h1>
         <p>
-          View the number of{" "}
-          <span style={{ color: "#FF8C00" }}>{selectedEventFound.label || selectedEvent}</span> events over
-          time.
+          View the number of <span style={{ color: "#FF8C00" }}>artists</span> created over time.
         </p>
       </div>
       <div style={{ width: "100%", height: 400 }}>
@@ -709,9 +711,6 @@ const EventGraph: React.FC<EventGraphProps> = ({ eventTypes }) => {
             </LineChart>
           </ResponsiveContainer>
         )}
-      </div>
-      <div style={{ marginBottom: "64px" }}>
-        <BottomDiv />
       </div>
     </div>
   );

@@ -24,14 +24,30 @@ export default function Home() {
     const fetchData = async () => {
 
       const eventQuery = `
-      query EventTypes {
-      raw_events(
-        distinct_on: [event_name, contract_name]
-      ) {
-        event_name
-        contract_name
-      }
+      query {
+  Artists {
+    docs {
+      id
+      artistName
+      slug
+      artistResident
+      intro
+      biography
+      tagline
+      dateCreated
+      instagram
+      soundcloud
+      twitter
+      youtube
+      facebook
+      mixcloud
+      website
+      updatedAt
+      createdAt
+      _status
     }
+  }
+}
     `;
 
       const eventTypesResponse: DistinctEventsResponse = await graphqlClient.request(eventQuery);
